@@ -3,7 +3,7 @@
 ## 1. Overview
 
 A Streamlit chat application that lets a user upload one or more PDFs per
-conversation ("chat") and ask questions answered strictly from the content
+conversation ("chat") and then ask questions answered strictly from the content
 of those PDFs. The system combines dense (embedding) and sparse (BM25)
 retrieval over a Milvus vector store, fuses the two rankings with
 Reciprocal Rank Fusion (RRF), reranks the fused candidates with the Jina
