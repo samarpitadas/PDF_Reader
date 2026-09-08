@@ -13,7 +13,7 @@ __pycache__/
 venv/
 .venv/
 env/
-
+volumes/
 # =========================
 # Environment / Secrets
 # =========================
@@ -70,3 +70,4 @@ Thumbs.db
 *.tmp
 *.temp
 *.bak
+*.yaml

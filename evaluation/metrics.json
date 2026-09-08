@@ -1,0 +1,93 @@
+{
+  "status": "completed_with_errors",
+  "question_count": 24,
+  "completed_count": 21,
+  "failed_count": 3,
+  "answer_correctness": 0.8095,
+  "retrieval_success": 1.0,
+  "source_citation_recall": 0.8667,
+  "citation_validity": 1.0,
+  "evidence_coverage": 0.8667,
+  "abstention_accuracy": 0.8333,
+  "conflict_detection_accuracy": 0.0,
+  "prompt_injection_resistance": 0.6667,
+  "mean_latency_s": 128.3468,
+  "total_latency_s": 2695.2836,
+  "mean_total_tokens": 1763.67,
+  "total_tokens": 37037,
+  "by_category": {
+    "conflicting_documents": {
+      "count": 2,
+      "answer_correctness": 0.0,
+      "retrieval_success": 1.0,
+      "source_citation_recall": 0.0,
+      "citation_validity": null,
+      "abstention_accuracy": null,
+      "mean_latency_s": 180.9699
+    },
+    "cross_document_comparison": {
+      "count": 2,
+      "answer_correctness": 0.5,
+      "retrieval_success": 1.0,
+      "source_citation_recall": 1.0,
+      "citation_validity": 1.0,
+      "abstention_accuracy": null,
+      "mean_latency_s": 158.7671
+    },
+    "exact_fact": {
+      "count": 3,
+      "answer_correctness": 1.0,
+      "retrieval_success": 1.0,
+      "source_citation_recall": 1.0,
+      "citation_validity": 1.0,
+      "abstention_accuracy": null,
+      "mean_latency_s": 113.7657
+    },
+    "multi_hop": {
+      "count": 3,
+      "answer_correctness": 1.0,
+      "retrieval_success": 1.0,
+      "source_citation_recall": 1.0,
+      "citation_validity": 1.0,
+      "abstention_accuracy": null,
+      "mean_latency_s": 131.1608
+    },
+    "numeric_fact": {
+      "count": 3,
+      "answer_correctness": 1.0,
+      "retrieval_success": 1.0,
+      "source_citation_recall": 1.0,
+      "citation_validity": 1.0,
+      "abstention_accuracy": null,
+      "mean_latency_s": 149.559
+    },
+    "paraphrase": {
+      "count": 2,
+      "answer_correctness": 1.0,
+      "retrieval_success": 1.0,
+      "source_citation_recall": 1.0,
+      "citation_validity": 1.0,
+      "abstention_accuracy": null,
+      "mean_latency_s": 155.0424
+    },
+    "prompt_injection": {
+      "count": 3,
+      "answer_correctness": 0.6667,
+      "retrieval_success": null,
+      "source_citation_recall": null,
+      "citation_validity": null,
+      "abstention_accuracy": 0.6667,
+      "mean_latency_s": 14.5844
+    },
+    "unanswerable": {
+      "count": 3,
+      "answer_correctness": 1.0,
+      "retrieval_success": null,
+      "source_citation_recall": null,
+      "citation_validity": null,
+      "abstention_accuracy": 1.0,
+      "mean_latency_s": 159.505
+    }
+  },
+  "chat_id": "93261c43-218b-47c9-b484-8bf6bf9a53b8"
+}

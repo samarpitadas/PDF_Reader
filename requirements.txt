@@ -1,6 +1,11 @@
-langchain 
-langchain-community 
-langchain-chroma
-langchain-ollama 
-pypdf 
+langchain
+langchain-community
+langchain-core
+langchain-text-splitters
+langchain-ollama
+pymilvus
+pypdf
 streamlit
+requests
+python-dotenv
+pytest

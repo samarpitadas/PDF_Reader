@@ -6,8 +6,6 @@ import sqlite3
 import tempfile
 import shutil
 import json
-import base64
-import textwrap
 import traceback
 from datetime import datetime
 
@@ -15,11 +13,11 @@ import streamlit as st
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
 import requests
 import re
-from pymilvus import MilvusClient, DataType, Function, FunctionType
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -33,15 +31,8 @@ DB_PATH = os.path.join(APP_DIR, "chat_history.db")
 CHATS_DIR = os.path.join(APP_DIR, "chats")
 
 # Retrieval + reranking configuration
-DENSE_K = 12
-SPARSE_K = 12
-FUSION_K = 16
+RETRIEVAL_K = 12
 RERANK_K = 6
-RRF_K = 60
-MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
-MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "")
-MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "pdf_rag_chunks")
-DENSE_VECTOR_DIM = int(os.getenv("DENSE_VECTOR_DIM", "768"))
 JINA_RERANKER_MODEL = "jina-reranker-v3.5"
 JINA_API_URL = "https://api.jina.ai/v1/rerank"
 JINA_API_KEY = os.getenv("JINA_API_KEY")
@@ -132,7 +123,7 @@ def invoke_llama_with_metrics(prompt_text):
             "prompt": prompt_text,
             "stream": False
         },
-        timeout=300
+        timeout=180
     )
     response.raise_for_status()
 
@@ -186,466 +177,6 @@ st.set_page_config(
     page_icon="📚",
     layout="wide"
 )
-
-
-# ============================================================
-# THEME / STYLING (visual only — no logic below is touched)
-# ============================================================
-
-def inject_custom_theme():
-    st.markdown(
-        """
-        <style>
-
-        /* ---------- Palette (simplified: near-black + deep purple + mint accent) ---------- */
-        :root {
-            --bg-main:#131017;
-            --bg-main-2:#171320;
-            --sidebar-bg:#1c1526;
-            --sidebar-bg-2:#170f20;
-            --purple-700:#4c2a8c;
-            --purple-600:#6236b0;
-            --purple-500:#7c3aed;
-            --purple-400:#9b6ff0;
-            --purple-300:#c4a6f7;
-            --mint-600:#0f9d6f;
-            --mint-500:#1abc7b;
-            --mint-400:#3ddc9c;
-            --mint-300:#7bf0c2;
-            --ink-100:#f2f0f6;
-            --ink-300:#cfc9dc;
-            --ink-500:#8d84a3;
-            --border-soft:rgba(124,58,237,0.22);
-        }
-
-        /* ---------- App background ---------- */
-        .stApp {
-            background: linear-gradient(180deg, var(--bg-main) 0%, var(--bg-main-2) 100%);
-            color: var(--ink-100);
-        }
-
-        /* Center + cap the main chat column width */
-        .block-container {
-            max-width: 880px;
-            padding-top: 1.2rem;
-            padding-bottom: 6rem;
-        }
-
-        /* ---------- Sidebar ---------- */
-        section[data-testid="stSidebar"] {
-            background: linear-gradient(190deg, var(--sidebar-bg) 0%, var(--sidebar-bg-2) 100%);
-            border-right: 1px solid var(--border-soft);
-            min-width: 270px !important;
-            max-width: 280px !important;
-        }
-        section[data-testid="stSidebar"] * {
-            color: var(--ink-100) !important;
-        }
-        section[data-testid="stSidebar"] h1 {
-            font-size: 1.15rem;
-            font-weight: 800;
-            background: linear-gradient(90deg, var(--mint-400), var(--purple-300));
-            -webkit-background-clip: text;
-            background-clip: text;
-            -webkit-text-fill-color: transparent;
-            letter-spacing: 0.3px;
-            margin-bottom: 0.2rem;
-        }
-        section[data-testid="stSidebar"] .sidebar-group-label {
-            color: var(--ink-500) !important;
-            font-weight: 700;
-            text-transform: uppercase;
-            font-size: 0.7rem;
-            letter-spacing: 1.1px;
-            margin: 0.9rem 0 0.15rem 0.15rem;
-            opacity: 0.85;
-        }
-        section[data-testid="stSidebar"] hr {
-            border-color: var(--border-soft);
-            margin: 0.7rem 0;
-        }
-
-        /* Compact single-line chat rows (no big boxes) */
-        section[data-testid="stSidebar"] .stButton > button {
-            background: transparent;
-            border: 1px solid transparent;
-            color: var(--ink-300) !important;
-            border-radius: 8px;
-            text-align: left;
-            padding: 0.35rem 0.6rem;
-            font-size: 0.86rem;
-            font-weight: 400;
-            transition: background 0.15s ease, color 0.15s ease;
-            box-shadow: none;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        section[data-testid="stSidebar"] .stButton > button:hover {
-            background: rgba(124,58,237,0.18);
-            color: var(--ink-100) !important;
-            border-color: transparent;
-            transform: none;
-            box-shadow: none;
-        }
-        /* Current chat: subtle highlight only, no card border */
-        section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
-            background: linear-gradient(90deg, rgba(124,58,237,0.30), rgba(26,188,123,0.14));
-            color: var(--ink-100) !important;
-            border: 1px solid rgba(124,58,237,0.4);
-            font-weight: 600;
-        }
-        section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
-            background: linear-gradient(90deg, rgba(124,58,237,0.40), rgba(26,188,123,0.20));
-        }
-        /* New Chat button stands out a bit more */
-        section[data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"]:first-of-type .stButton > button {
-            background: linear-gradient(135deg, var(--purple-600), var(--purple-500));
-            color: #fff !important;
-            border: none;
-            font-weight: 600;
-            padding: 0.5rem 0.7rem;
-        }
-
-        /* ⋮ popover trigger — tiny, ghost, appears deliberate not boxy */
-        section[data-testid="stSidebar"] [data-testid="stPopover"] > div > button {
-            background: transparent !important;
-            border: none !important;
-            color: var(--ink-500) !important;
-            padding: 0.1rem 0.3rem !important;
-            font-size: 0.9rem !important;
-            min-height: 1.6rem !important;
-        }
-        section[data-testid="stSidebar"] [data-testid="stPopover"] > div > button:hover {
-            color: var(--mint-400) !important;
-        }
-
-        /* Sidebar search box */
-        section[data-testid="stSidebar"] input {
-            background: rgba(0,0,0,0.25) !important;
-            border: 1px solid var(--border-soft) !important;
-            border-radius: 8px !important;
-            font-size: 0.85rem !important;
-        }
-
-        /* ---------- Minimal top bar ---------- */
-        .top-bar {
-            display: flex;
-            align-items: baseline;
-            justify-content: space-between;
-            padding: 0.1rem 0.1rem 0.6rem 0.1rem;
-        }
-        .top-bar-title {
-            font-size: 1.05rem;
-            font-weight: 700;
-            color: var(--ink-100);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 70%;
-        }
-        .top-bar-meta {
-            font-size: 0.8rem;
-            color: var(--mint-400);
-            font-weight: 600;
-            white-space: nowrap;
-        }
-        .top-bar-divider {
-            height: 1px;
-            background: linear-gradient(90deg, var(--border-soft), transparent);
-            margin-bottom: 1rem;
-        }
-
-        /* ---------- Document chip strip ---------- */
-        .doc-strip {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.4rem;
-            margin-bottom: 1.1rem;
-        }
-        .doc-chip {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.35rem;
-            background: rgba(124,58,237,0.14);
-            border: 1px solid var(--border-soft);
-            color: var(--ink-300);
-            padding: 0.25rem 0.65rem;
-            border-radius: 999px;
-            font-size: 0.78rem;
-        }
-
-        /* ---------- Chat messages: ChatGPT-style left/right, no giant cards ---------- */
-        [data-testid="stChatMessage"] {
-            background: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
-            padding: 0.15rem 0 !important;
-            margin-bottom: 0.9rem !important;
-            animation: msg-in 0.18s ease-out;
-        }
-        @keyframes msg-in {
-            from { opacity: 0; transform: translateY(4px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
-            flex-direction: row-reverse;
-        }
-        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) [data-testid="stChatMessageContent"] {
-            background: linear-gradient(135deg, var(--purple-600), var(--purple-700));
-            color: #fff !important;
-            border-radius: 16px 16px 4px 16px;
-            padding: 0.55rem 0.9rem !important;
-            margin-left: 18%;
-            display: inline-block;
-        }
-        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) [data-testid="stChatMessageContent"] {
-            background: rgba(255,255,255,0.045);
-            border: 1px solid var(--border-soft);
-            border-radius: 16px 16px 16px 4px;
-            padding: 0.6rem 1rem !important;
-            margin-right: 8%;
-        }
-        [data-testid="stChatMessageAvatarUser"] {
-            background: linear-gradient(135deg, var(--purple-500), var(--purple-700)) !important;
-            width: 1.75rem !important;
-            height: 1.75rem !important;
-        }
-        [data-testid="stChatMessageAvatarAssistant"] {
-            background: linear-gradient(135deg, var(--mint-500), var(--mint-600)) !important;
-            width: 1.75rem !important;
-            height: 1.75rem !important;
-        }
-
-        /* Citation badges like [S1] [S2] */
-        .citation-badge {
-            display: inline-block;
-            background: rgba(26,188,123,0.18);
-            color: var(--mint-300);
-            border: 1px solid rgba(26,188,123,0.4);
-            border-radius: 5px;
-            padding: 0px 5px;
-            font-size: 0.72em;
-            font-weight: 700;
-            margin: 0 1px;
-        }
-
-        /* Copy button under assistant messages */
-        .msg-copy-btn {
-            background: transparent;
-            border: 1px solid var(--border-soft);
-            color: var(--ink-500);
-            border-radius: 6px;
-            font-size: 0.7rem;
-            padding: 1px 8px;
-            cursor: pointer;
-            margin-top: 0.35rem;
-            transition: all 0.15s ease;
-        }
-        .msg-copy-btn:hover {
-            color: var(--mint-400);
-            border-color: var(--mint-400);
-        }
-
-        /* ---------- Chat input ---------- */
-        [data-testid="stChatInput"] {
-            border: 1px solid rgba(26,188,123,0.35) !important;
-            border-radius: 22px !important;
-            background: rgba(255,255,255,0.04) !important;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.25);
-        }
-        [data-testid="stChatInput"] textarea {
-            color: var(--ink-100) !important;
-        }
-        [data-testid="stChatInput"]:focus-within {
-            border-color: var(--mint-400) !important;
-            box-shadow: 0 0 0 2px rgba(61,220,156,0.30) !important;
-        }
-
-        /* ---------- Expanders (used for details/sources, kept subtle) ---------- */
-        [data-testid="stExpander"] {
-            border: 1px solid var(--border-soft) !important;
-            border-radius: 10px !important;
-            background: rgba(255,255,255,0.02) !important;
-            overflow: hidden;
-        }
-        [data-testid="stExpander"] summary {
-            color: var(--ink-500) !important;
-            font-weight: 500;
-            font-size: 0.82rem;
-        }
-
-        /* ---------- Alerts ---------- */
-        div[data-testid="stAlert"] {
-            border-radius: 10px !important;
-            border: 1px solid var(--border-soft) !important;
-            background: rgba(255,255,255,0.03) !important;
-        }
-
-        /* ---------- Empty-state hero ---------- */
-        .hero-wrap {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            padding: 4.5rem 1rem 2rem 1rem;
-        }
-        .hero-icon {
-            font-size: 2.6rem;
-            margin-bottom: 0.4rem;
-        }
-        .hero-title {
-            font-size: 1.6rem;
-            font-weight: 800;
-            background: linear-gradient(90deg, var(--purple-300), var(--mint-400));
-            -webkit-background-clip: text;
-            background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 0.3rem;
-        }
-        .hero-sub {
-            color: var(--ink-500);
-            font-size: 0.95rem;
-            margin-bottom: 1.4rem;
-        }
-        .hero-pill {
-            display: inline-block;
-            background: linear-gradient(135deg, rgba(124,58,237,0.25), rgba(26,188,123,0.18));
-            border: 1px solid var(--border-soft);
-            color: var(--ink-100);
-            padding: 0.55rem 1.3rem;
-            border-radius: 999px;
-            font-size: 0.88rem;
-            font-weight: 600;
-            margin-bottom: 1.3rem;
-        }
-        .hero-hint {
-            color: var(--ink-500);
-            font-size: 0.85rem;
-            max-width: 420px;
-            line-height: 1.5;
-        }
-
-        /* ---------- Generic buttons outside sidebar ---------- */
-        .stButton > button {
-            border-radius: 10px;
-            border: 1px solid var(--border-soft);
-            background: linear-gradient(135deg, var(--purple-600), var(--purple-700));
-            color: #ffffff;
-            font-weight: 600;
-            transition: all 0.18s ease;
-        }
-        .stButton > button:hover {
-            background: linear-gradient(135deg, var(--mint-500), var(--purple-500));
-            border-color: var(--mint-400);
-            box-shadow: 0 4px 16px rgba(26,188,123,0.25);
-        }
-
-        /* ---------- Scrollbar ---------- */
-        ::-webkit-scrollbar { width: 8px; height: 8px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb {
-            background: linear-gradient(180deg, var(--purple-500), var(--mint-500));
-            border-radius: 8px;
-        }
-
-        /* ---------- Code blocks ---------- */
-        code, pre {
-            background: rgba(255,255,255,0.04) !important;
-            border-radius: 8px;
-        }
-
-        /* ---------- Spinner text ---------- */
-        .stSpinner > div {
-            color: var(--mint-300) !important;
-        }
-
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-
-
-inject_custom_theme()
-
-
-# ============================================================
-# UI-ONLY HELPERS (display formatting only — no data is
-# created, mutated, or fetched differently because of these;
-# they simply reshape what the existing functions already
-# returned for a nicer presentation)
-# ============================================================
-
-def group_chats_by_recency(chats):
-    """Bucket the already-fetched chat rows into Today / Yesterday /
-    Previous 7 Days / Older, purely for sidebar display grouping."""
-    from datetime import datetime as _dt, date as _date, timedelta as _td
-
-    buckets = [
-        ("Today", []),
-        ("Yesterday", []),
-        ("Previous 7 Days", []),
-        ("Older", []),
-    ]
-    bucket_map = dict(buckets)
-    today = _date.today()
-
-    for chat in chats:
-        raw_ts = chat[3] or chat[2]
-        chat_date = today
-        if raw_ts:
-            try:
-                chat_date = _dt.strptime(
-                    str(raw_ts).split(".")[0], "%Y-%m-%d %H:%M:%S"
-                ).date()
-            except Exception:
-                chat_date = today
-
-        if chat_date == today:
-            bucket_map["Today"].append(chat)
-        elif chat_date == today - _td(days=1):
-            bucket_map["Yesterday"].append(chat)
-        elif chat_date >= today - _td(days=7):
-            bucket_map["Previous 7 Days"].append(chat)
-        else:
-            bucket_map["Older"].append(chat)
-
-    return [(label, rows) for label, rows in buckets if rows]
-
-
-def truncate_title(title, max_len=26):
-    title = title or "New Chat"
-    return title if len(title) <= max_len else title[: max_len - 1] + "…"
-
-
-def render_with_citation_badges(text):
-    """Wrap [S1], [S2]... citation markers in a small styled badge span
-    for display only. The underlying answer text saved to the database
-    is completely untouched — this only affects how it is rendered."""
-    return re.sub(r"\[S\d+\]", lambda m: f'<span class="citation-badge">{m.group(0)}</span>', text)
-
-
-def render_assistant_markdown(text):
-    """Render assistant markdown with citation badges. Falls back to a
-    plain st.markdown call — no behavior other than presentation changes."""
-    st.markdown(render_with_citation_badges(text), unsafe_allow_html=True)
-
-
-def render_copy_button(text, key):
-    """Small 'Copy' affordance under an assistant message using the
-    clipboard API. Purely cosmetic/UI — does not touch stored data.
-
-    The text is base64-encoded so no quote characters ever end up
-    inside the HTML attribute (that quote collision is what caused
-    the button to render as literal escaped text before)."""
-    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-    button_html = (
-        '<button class="msg-copy-btn" '
-        f'onclick="navigator.clipboard.writeText(decodeURIComponent(escape(window.atob(\'{encoded}\'))))">'
-        '⧉ Copy</button>'
-    )
-    st.markdown(button_html, unsafe_allow_html=True)
 
 
 # ============================================================
@@ -775,6 +306,10 @@ def create_chat():
     chat_folder = os.path.join(CHATS_DIR, chat_id)
 
     os.makedirs(chat_folder, exist_ok=True)
+    os.makedirs(
+        os.path.join(chat_folder, "chroma"),
+        exist_ok=True
+    )
 
     return chat_id
 
@@ -879,18 +414,7 @@ def delete_chat(chat_id):
     conn.commit()
     conn.close()
 
-    # Delete this chat's chunks from Milvus as well.
-    try:
-        client = ensure_milvus_collection()
-        client.delete(
-            collection_name=MILVUS_COLLECTION,
-            filter=f'chat_id == "{chat_id}"',
-        )
-    except Exception:
-        # Do not prevent local chat deletion if Milvus is temporarily unavailable.
-        pass
-
-    # Delete files and local chat data
+    # Delete files and Chroma database
     chat_folder = os.path.join(CHATS_DIR, chat_id)
 
     if os.path.exists(chat_folder):
@@ -1097,81 +621,26 @@ def split_documents(documents):
 
 
 # ============================================================
-# MILVUS DATABASE — DENSE + BM25
+# CHROMA DATABASE
 # ============================================================
 
-@st.cache_resource
-def get_milvus_client():
-    kwargs = {"uri": MILVUS_URI}
-    if MILVUS_TOKEN:
-        kwargs["token"] = MILVUS_TOKEN
-    return MilvusClient(**kwargs)
+def get_chroma_path(chat_id):
 
-
-def ensure_milvus_collection():
-    client = get_milvus_client()
-
-    if client.has_collection(MILVUS_COLLECTION):
-        return client
-
-    schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
-    schema.add_field(
-        field_name="chunk_id",
-        datatype=DataType.VARCHAR,
-        max_length=64,
-        is_primary=True,
-    )
-    schema.add_field(
-        field_name="text",
-        datatype=DataType.VARCHAR,
-        max_length=65535,
-        enable_analyzer=True,
-    )
-    schema.add_field(
-        field_name="dense_vector",
-        datatype=DataType.FLOAT_VECTOR,
-        dim=DENSE_VECTOR_DIM,
-    )
-    schema.add_field(
-        field_name="sparse_vector",
-        datatype=DataType.SPARSE_FLOAT_VECTOR,
-    )
-    schema.add_field(field_name="chat_id", datatype=DataType.VARCHAR, max_length=64)
-    schema.add_field(field_name="source_file", datatype=DataType.VARCHAR, max_length=1024)
-    schema.add_field(field_name="file_hash", datatype=DataType.VARCHAR, max_length=32)
-    schema.add_field(field_name="page", datatype=DataType.INT64)
-    schema.add_field(field_name="chunk_index", datatype=DataType.INT64)
-
-    bm25_function = Function(
-        name="text_bm25",
-        input_field_names=["text"],
-        output_field_names=["sparse_vector"],
-        function_type=FunctionType.BM25,
-    )
-    schema.add_function(bm25_function)
-
-    index_params = client.prepare_index_params()
-    index_params.add_index(
-        field_name="dense_vector",
-        index_type="AUTOINDEX",
-        metric_type="COSINE",
-    )
-    index_params.add_index(
-        field_name="sparse_vector",
-        index_type="SPARSE_INVERTED_INDEX",
-        metric_type="BM25",
+    return os.path.join(
+        CHATS_DIR,
+        chat_id,
+        "chroma"
     )
 
-    client.create_collection(
-        collection_name=MILVUS_COLLECTION,
-        schema=schema,
-        index_params=index_params,
+
+def get_vector_store(chat_id):
+
+    chroma_path = get_chroma_path(chat_id)
+
+    return Chroma(
+        persist_directory=chroma_path,
+        embedding_function=embeddings
     )
-    return client
-
-
-def get_vector_store(chat_id=None):
-    return ensure_milvus_collection()
 
 
 def make_stable_chunk_id(chat_id, file_hash, page, chunk_index, chunk_text):
@@ -1180,31 +649,12 @@ def make_stable_chunk_id(chat_id, file_hash, page, chunk_index, chunk_text):
 
 
 def add_documents_to_vector_store(chat_id, chunks, chunk_ids):
-    client = ensure_milvus_collection()
-
-    dense_vectors = embeddings.embed_documents(
-        [chunk.page_content for chunk in chunks]
+    vector_store = get_vector_store(chat_id)
+    vector_store.add_documents(
+        documents=chunks,
+        ids=chunk_ids
     )
-
-    rows = []
-    for chunk, chunk_id, dense_vector in zip(chunks, chunk_ids, dense_vectors):
-        page = chunk.metadata.get("page")
-        rows.append({
-            "chunk_id": chunk_id,
-            "text": chunk.page_content,
-            "dense_vector": dense_vector,
-            "chat_id": chat_id,
-            "source_file": chunk.metadata.get("source_file", "Unknown PDF"),
-            "file_hash": chunk.metadata.get("file_hash", ""),
-            "page": int(page) if page is not None else -1,
-            "chunk_index": int(chunk.metadata.get("chunk_index", 0)),
-        })
-
-    if rows:
-        client.insert(collection_name=MILVUS_COLLECTION, data=rows)
-        client.flush(MILVUS_COLLECTION)
-
-    return client
+    return vector_store
 
 
 def make_unique_stored_filename(chat_id, filename, file_hash):
@@ -1254,7 +704,7 @@ def process_pdf(chat_id, file_bytes, filename):
             log_file=format_log_location()
         )
 
-        return ensure_milvus_collection(), False, 0
+        return get_vector_store(chat_id), False, 0
 
     chat_folder = os.path.join(CHATS_DIR, chat_id)
     os.makedirs(chat_folder, exist_ok=True)
@@ -1337,7 +787,7 @@ def process_pdf(chat_id, file_bytes, filename):
     )
 
     # --------------------------------------------------------
-    # Stage 6: Milvus dense + BM25 indexing
+    # Stage 6: Chroma indexing
     # --------------------------------------------------------
     stage_start = time.perf_counter()
 
@@ -1347,7 +797,7 @@ def process_pdf(chat_id, file_bytes, filename):
         chunk_ids
     )
 
-    stage_timings["milvus_indexing_s"] = (
+    stage_timings["chroma_indexing_s"] = (
         time.perf_counter() - stage_start
     )
 
@@ -1404,17 +854,25 @@ def process_pdf(chat_id, file_bytes, filename):
 
 
 # ============================================================
-# LOAD EXISTING MILVUS DATABASE
+# LOAD EXISTING VECTOR DATABASE
 # ============================================================
 
 def load_existing_vector_store(chat_id):
+
     documents = get_documents(chat_id)
+
+    chroma_path = get_chroma_path(chat_id)
+
     if not documents:
         return None
-    try:
-        return ensure_milvus_collection()
-    except Exception:
+
+    if not os.path.exists(chroma_path):
         return None
+
+    return Chroma(
+        persist_directory=chroma_path,
+        embedding_function=embeddings
+    )
 
 
 # ============================================================
@@ -1496,19 +954,6 @@ def assess_evidence(answer, docs):
 
     return "SUPPORTED BY RETRIEVED PDF EVIDENCE"
 
-def calculate_evidence_coverage(answer, docs):
-    """Return the fraction of unique cited source IDs that map to retrieved docs."""
-    if not docs:
-        return 0.0
-
-    import re
-    cited_ids = {int(x) for x in re.findall(r"\[S(\d+)\]", answer)}
-    if not cited_ids:
-        return 0.0
-
-    valid_ids = {i for i in cited_ids if 1 <= i <= len(docs)}
-    return len(valid_ids) / len(cited_ids)
-
 
 def detect_cross_document_conflicts(docs):
     # Conservative warning: flag different numeric evidence across
@@ -1540,150 +985,63 @@ def detect_cross_document_conflicts(docs):
     return warnings
 
 
-def _milvus_doc_from_result(result, retrieval_source, rank, score):
-    entity = result.get("entity", result)
-    metadata = {
-        "chunk_id": entity.get("chunk_id", result.get("id", "unknown")),
-        "chat_id": entity.get("chat_id"),
-        "source_file": entity.get("source_file", "Unknown PDF"),
-        "file_hash": entity.get("file_hash", ""),
-        "page": entity.get("page", -1),
-        "chunk_index": entity.get("chunk_index", -1),
-        "retrieval_source": retrieval_source,
-        "retrieval_rank": rank,
-        "retrieval_score": float(score),
-    }
-    return {"page_content": entity.get("text", ""), "metadata": metadata}
-
-
-def _rrf_fuse(dense_results, sparse_results):
-    fused = {}
-
-    for results in (dense_results, sparse_results):
-        for rank, item in enumerate(results, start=1):
-            chunk_id = item["metadata"]["chunk_id"]
-            fused.setdefault(chunk_id, {
-                "doc": item,
-                "rrf_score": 0.0,
-                "dense_rank": None,
-                "sparse_rank": None,
-                "dense_score": None,
-                "sparse_score": None,
-            })
-
-            fused[chunk_id]["rrf_score"] += 1.0 / (RRF_K + rank)
-            if item["metadata"]["retrieval_source"] == "dense":
-                fused[chunk_id]["dense_rank"] = rank
-                fused[chunk_id]["dense_score"] = item["metadata"]["retrieval_score"]
-            else:
-                fused[chunk_id]["sparse_rank"] = rank
-                fused[chunk_id]["sparse_score"] = item["metadata"]["retrieval_score"]
-
-    ranked = sorted(fused.values(), key=lambda x: x["rrf_score"], reverse=True)
-
-    docs = []
-    records = []
-    for item in ranked[:FUSION_K]:
-        doc = item["doc"]
-        doc["metadata"].update({
-            "rrf_score": item["rrf_score"],
-            "dense_rank": item["dense_rank"],
-            "sparse_rank": item["sparse_rank"],
-            "dense_score": item["dense_score"],
-            "sparse_score": item["sparse_score"],
-        })
-        docs.append(doc)
-        records.append({
-            "chunk_id": doc["metadata"]["chunk_id"],
-            "rrf_score": item["rrf_score"],
-            "dense_rank": item["dense_rank"],
-            "sparse_rank": item["sparse_rank"],
-            "dense_score": item["dense_score"],
-            "sparse_score": item["sparse_score"],
-        })
-
-    return docs, records
-
-
 def generate_response(vector_store, query, chat_history, chat_id):
     total_start = time.perf_counter()
     request_id = str(uuid.uuid4())
     stage_timings = {}
-    client = vector_store or ensure_milvus_collection()
-    chat_filter = f'chat_id == "{chat_id}"'
 
-    # Stage 1: dense embedding retrieval — top 12
+    # --------------------------------------------------------
+    # Stage 1: Chroma retrieval
+    # --------------------------------------------------------
     stage_start = time.perf_counter()
-    dense_query_vector = embeddings.embed_query(query)
 
-    dense_raw = client.search(
-        collection_name=MILVUS_COLLECTION,
-        data=[dense_query_vector],
-        anns_field="dense_vector",
-        filter=chat_filter,
-        limit=DENSE_K,
-        output_fields=["text", "chunk_id", "chat_id", "source_file", "file_hash", "page", "chunk_index"],
-        search_params={"metric_type": "COSINE", "params": {}},
-    )[0]
+    candidate_docs = vector_store.similarity_search(
+        query,
+        k=RETRIEVAL_K
+    )
 
-    dense_results = [
-        _milvus_doc_from_result(r, "dense", i, r.get("distance", 0.0))
-        for i, r in enumerate(dense_raw, start=1)
-    ]
-    stage_timings["dense_retrieval_s"] = time.perf_counter() - stage_start
+    stage_timings["chroma_retrieval_s"] = (
+        time.perf_counter() - stage_start
+    )
 
-    # Stage 2: raw query text -> Milvus BM25 full-text retrieval — top 12
+    # --------------------------------------------------------
+    # Stage 2: Jina reranking
+    # --------------------------------------------------------
     stage_start = time.perf_counter()
-    sparse_raw = client.search(
-        collection_name=MILVUS_COLLECTION,
-        data=[query],
-        anns_field="sparse_vector",
-        filter=chat_filter,
-        limit=SPARSE_K,
-        output_fields=["text", "chunk_id", "chat_id", "source_file", "file_hash", "page", "chunk_index"],
-        search_params={"metric_type": "BM25", "params": {}},
-    )[0]
-
-    sparse_results = [
-        _milvus_doc_from_result(r, "sparse_bm25", i, r.get("distance", 0.0))
-        for i, r in enumerate(sparse_raw, start=1)
-    ]
-    stage_timings["bm25_retrieval_s"] = time.perf_counter() - stage_start
-
-    # Stage 3: RRF fusion + deduplication — top 16
-    stage_start = time.perf_counter()
-    fused_docs, fusion_records = _rrf_fuse(dense_results, sparse_results)
-    stage_timings["rrf_fusion_s"] = time.perf_counter() - stage_start
-
-    # Stage 4: Jina reranking — final 6
-    stage_start = time.perf_counter()
-    from langchain_core.documents import Document
-    fused_langchain_docs = [
-        Document(page_content=d["page_content"], metadata=d["metadata"])
-        for d in fused_docs
-    ]
 
     matching_docs, jina_metrics, _ = jina_rerank(
-        query, fused_langchain_docs, top_n=RERANK_K
+        query,
+        candidate_docs,
+        top_n=RERANK_K
     )
-    stage_timings["jina_rerank_s"] = time.perf_counter() - stage_start
 
-    # Stage 5: citation-aware context
+    stage_timings["jina_rerank_s"] = (
+        time.perf_counter() - stage_start
+    )
+
+    # --------------------------------------------------------
+    # Stage 3: Build citation-aware context
+    # --------------------------------------------------------
     stage_start = time.perf_counter()
+
     context_parts = []
     source_records = []
 
     for source_index, doc in enumerate(matching_docs, start=1):
-        source_file = doc.metadata.get("source_file", "Unknown PDF")
+        source_file = doc.metadata.get(
+            "source_file",
+            "Unknown PDF"
+        )
         page = doc.metadata.get("page")
         chunk_id = doc.metadata.get("chunk_id", "unknown")
-        citation = f"[S{source_index}]"
+        jina_score = doc.metadata.get("jina_score", 0.0)
 
-        source_info = (
-            f"{source_file}, page {page + 1}"
-            if page is not None and page >= 0
-            else source_file
-        )
+        if page is not None:
+            source_info = f"{source_file}, page {page + 1}"
+        else:
+            source_info = source_file
+
+        citation = f"[S{source_index}]"
 
         context_parts.append(
             f"{citation} Source: {source_info}\n"
@@ -1694,32 +1052,39 @@ def generate_response(vector_store, query, chat_history, chat_id):
         source_records.append({
             "citation": citation,
             "source_file": source_file,
-            "page": page + 1 if page is not None and page >= 0 else None,
+            "page": page + 1 if page is not None else None,
             "chunk_id": chunk_id,
-            "dense_rank": doc.metadata.get("dense_rank"),
-            "sparse_rank": doc.metadata.get("sparse_rank"),
-            "dense_score": doc.metadata.get("dense_score"),
-            "sparse_bm25_score": doc.metadata.get("sparse_score"),
-            "rrf_score": doc.metadata.get("rrf_score", 0.0),
-            "jina_relevance_score": doc.metadata.get("jina_score", 0.0),
-            "chunk_text": doc.page_content,
+            "jina_relevance_score": jina_score,
+            "chunk_text": doc.page_content
         })
 
     context = "\n\n".join(context_parts)
-    history_text = "".join(
-        f"{m['role'].upper()}: {m['content']}\n" for m in chat_history
-    )
-    stage_timings["context_build_s"] = time.perf_counter() - stage_start
 
-    # Stage 6: prompt construction
+    history_text = ""
+
+    for message in chat_history:
+        history_text += (
+            f"{message['role'].upper()}: "
+            f"{message['content']}\n"
+        )
+
+    stage_timings["context_build_s"] = (
+        time.perf_counter() - stage_start
+    )
+
+    # --------------------------------------------------------
+    # Stage 4: Prompt construction
+    # --------------------------------------------------------
     stage_start = time.perf_counter()
+
     prompt_template = ChatPromptTemplate.from_template(
-        '''
+        """
 You are a helpful PDF question-answering assistant.
 
 Answer the user's question using ONLY the provided PDF evidence.
 
 IMPORTANT RULES:
+
 1. Use the PDF context as the primary source.
 2. Do not invent information.
 3. Every factual claim from a PDF MUST include [S1], [S2], etc.
@@ -1740,32 +1105,66 @@ Current question:
 {input}
 
 Answer:
-'''
+"""
     )
+
     prompt_value = prompt_template.invoke({
-        "history": history_text, "context": context, "input": query
+        "history": history_text,
+        "context": context,
+        "input": query
     })
     prompt_text = prompt_value.to_string()
-    stage_timings["prompt_construction_s"] = time.perf_counter() - stage_start
 
-    # Stage 7: Llama generation
-    stage_start = time.perf_counter()
-    answer, llama_metrics = invoke_llama_with_metrics(prompt_text)
-    stage_timings["llama_generation_s"] = time.perf_counter() - stage_start
+    stage_timings["prompt_construction_s"] = (
+        time.perf_counter() - stage_start
+    )
 
-    # Stage 8: evidence validation
+    # --------------------------------------------------------
+    # Stage 5: Llama generation + token accounting
+    # --------------------------------------------------------
     stage_start = time.perf_counter()
-    evidence_status = assess_evidence(answer, matching_docs)
-    stage_timings["evidence_check_s"] = time.perf_counter() - stage_start
 
-    # Stage 9: conflict check
+    answer, llama_metrics = invoke_llama_with_metrics(
+        prompt_text
+    )
+
+    stage_timings["llama_generation_s"] = (
+        time.perf_counter() - stage_start
+    )
+
+    # --------------------------------------------------------
+    # Stage 6: Evidence validation
+    # --------------------------------------------------------
     stage_start = time.perf_counter()
-    conflicts = detect_cross_document_conflicts(matching_docs)
-    stage_timings["conflict_check_s"] = time.perf_counter() - stage_start
+
+    evidence_status = assess_evidence(
+        answer,
+        matching_docs
+    )
+
+    stage_timings["evidence_check_s"] = (
+        time.perf_counter() - stage_start
+    )
+
+    # --------------------------------------------------------
+    # Stage 7: Cross-document conflict check
+    # --------------------------------------------------------
+    stage_start = time.perf_counter()
+
+    conflicts = detect_cross_document_conflicts(
+        matching_docs
+    )
+
+    stage_timings["conflict_check_s"] = (
+        time.perf_counter() - stage_start
+    )
 
     total_time = time.perf_counter() - total_start
     stage_timings["total_pipeline_s"] = total_time
 
+    # --------------------------------------------------------
+    # Structured query log
+    # --------------------------------------------------------
     write_structured_log(
         "rag_query",
         request_id=request_id,
@@ -1773,42 +1172,34 @@ Answer:
         query=query,
         chat_history_message_count=len(chat_history),
         retrieval={
-            "dense_k": DENSE_K,
-            "dense_candidate_count": len(dense_results),
-            "sparse_k": SPARSE_K,
-            "sparse_bm25_candidate_count": len(sparse_results),
-            "selected_document_filter": chat_filter,
-        },
-        fusion={
-            "method": "RRF",
-            "rrf_k": RRF_K,
-            "fusion_k": FUSION_K,
-            "fused_count": len(fused_docs),
-            "records": fusion_records,
-            "stage_latency_s": stage_timings["rrf_fusion_s"],
+            "requested_k": RETRIEVAL_K,
+            "candidate_count": len(candidate_docs),
+            "stage_latency_s": stage_timings[
+                "chroma_retrieval_s"
+            ]
         },
         reranking=jina_metrics,
         final_context={
             "requested_k": RERANK_K,
             "selected_count": len(matching_docs),
-            "sources": source_records,
+            "sources": source_records
         },
         llama={
             **llama_metrics,
             "prompt_characters": len(prompt_text),
-            "answer_characters": len(answer),
+            "answer_characters": len(answer)
         },
         evidence_status=evidence_status,
         conflicts=conflicts,
         stage_timings=stage_timings,
         prompt=prompt_text,
         answer=answer,
-        log_file=format_log_location(),
+        log_file=format_log_location()
     )
 
     return (
         answer,
-        stage_timings["dense_retrieval_s"],
+        stage_timings["chroma_retrieval_s"],
         stage_timings["jina_rerank_s"],
         total_time,
         matching_docs,
@@ -1816,7 +1207,7 @@ Answer:
         conflicts,
         stage_timings,
         llama_metrics,
-        request_id,
+        request_id
     )
 
 
@@ -1846,35 +1237,18 @@ if "vector_store" not in st.session_state:
 # SIDEBAR
 # ============================================================
 
-def _switch_chat(chat_id):
-    st.session_state.current_chat_id = chat_id
-    st.session_state.vector_store = load_existing_vector_store(chat_id)
-    st.rerun()
-
-
-def _delete_chat_and_redirect(chat_id):
-    delete_chat(chat_id)
-
-    remaining_chats = get_all_chats()
-
-    if remaining_chats:
-        st.session_state.current_chat_id = remaining_chats[0][0]
-    else:
-        st.session_state.current_chat_id = create_chat()
-
-    st.session_state.vector_store = None
-    st.rerun()
-
-
 with st.sidebar:
 
-    st.title("📁 PDF RAG")
+    st.title("📚 PDF RAG")
 
     # --------------------------------------------------------
     # New Chat
     # --------------------------------------------------------
 
-    if st.button("＋ New Chat", use_container_width=True):
+    if st.button(
+        "＋ New Chat",
+        use_container_width=True
+    ):
 
         new_chat_id = create_chat()
 
@@ -1886,73 +1260,85 @@ with st.sidebar:
     st.divider()
 
     # --------------------------------------------------------
-    # Chat History — searchable, grouped, compact rows
+    # Chat History
     # --------------------------------------------------------
 
-    all_chats = get_all_chats()
+    st.subheader("Chats")
 
-    if len(all_chats) > 5:
-        search_query = st.text_input(
-            "Search chats",
-            key="chat_search_query",
-            placeholder="🔍 Search chats...",
-            label_visibility="collapsed"
-        ).strip().lower()
+    chats = get_all_chats()
+
+    if chats:
+
+        for chat in chats:
+
+            chat_id = chat[0]
+            title = chat[1]
+
+            # Highlight current chat
+            if chat_id == st.session_state.current_chat_id:
+
+                button_label = f"▶ {title}"
+
+            else:
+
+                button_label = f"  {title}"
+
+            if st.button(
+                button_label,
+                key=f"chat_{chat_id}",
+                use_container_width=True
+            ):
+
+                st.session_state.current_chat_id = chat_id
+
+                st.session_state.vector_store = (
+                    load_existing_vector_store(
+                        chat_id
+                    )
+                )
+
+                st.rerun()
+
     else:
-        search_query = ""
 
-    visible_chats = (
-        [c for c in all_chats if search_query in (c[1] or "").lower()]
-        if search_query else all_chats
-    )
+        st.caption("No conversations yet.")
 
-    if visible_chats:
+    st.divider()
 
-        for group_label, group_chats in group_chats_by_recency(visible_chats):
+    # --------------------------------------------------------
+    # Current Chat Actions
+    # --------------------------------------------------------
 
-            st.markdown(
-                f'<div class="sidebar-group-label">{group_label}</div>',
-                unsafe_allow_html=True
+    if st.button(
+        "🗑️ Delete Current Chat",
+        use_container_width=True
+    ):
+
+        current_chat_id = (
+            st.session_state.current_chat_id
+        )
+
+        delete_chat(
+            current_chat_id
+        )
+
+        remaining_chats = get_all_chats()
+
+        if remaining_chats:
+
+            st.session_state.current_chat_id = (
+                remaining_chats[0][0]
             )
 
-            for chat in group_chats:
+        else:
 
-                chat_id = chat[0]
-                title = chat[1]
-                is_current = chat_id == st.session_state.current_chat_id
+            st.session_state.current_chat_id = (
+                create_chat()
+            )
 
-                row_col, menu_col = st.columns([0.86, 0.14])
+        st.session_state.vector_store = None
 
-                with row_col:
-                    if st.button(
-                        truncate_title(title),
-                        key=f"chat_{chat_id}",
-                        use_container_width=True,
-                        type="primary" if is_current else "secondary"
-                    ):
-                        _switch_chat(chat_id)
-
-                with menu_col:
-                    if hasattr(st, "popover"):
-                        with st.popover("⋮", use_container_width=True):
-                            new_title = st.text_input(
-                                "Rename chat",
-                                value=title,
-                                key=f"rename_input_{chat_id}"
-                            )
-                            rename_col, delete_col = st.columns(2)
-                            with rename_col:
-                                if st.button("Save", key=f"rename_save_{chat_id}", use_container_width=True):
-                                    update_chat_title(chat_id, new_title.strip() or title)
-                                    st.rerun()
-                            with delete_col:
-                                if st.button("Delete", key=f"delete_{chat_id}", use_container_width=True):
-                                    _delete_chat_and_redirect(chat_id)
-
-    elif search_query:
-        st.caption("No chats match your search.")
-    else:
-        st.caption("No conversations yet.")
+        st.rerun()
 
 
 # ============================================================
@@ -1973,101 +1359,57 @@ if current_chat is None:
 
 
 # ============================================================
-# CURRENT CHAT DOCUMENTS (fetched first so the header can show
-# the PDF count — same get_documents() call as before)
+# MAIN HEADER
+# ============================================================
+
+st.title(
+    f"📚 {current_chat['title']}"
+)
+
+st.caption(
+    "Chat with one or more uploaded PDFs"
+)
+
+
+# ============================================================
+# CURRENT CHAT DOCUMENTS
 # ============================================================
 
 current_documents = get_documents(
     st.session_state.current_chat_id
 )
 
+if current_documents:
+
+    st.markdown("### 📄 Documents in this chat")
+
+    document_names = [
+        document["filename"]
+        for document in current_documents
+    ]
+
+    st.write(
+        " • ".join(document_names)
+    )
+
+
+# ============================================================
+# DISPLAY CHAT HISTORY
+# ============================================================
+
 messages = get_messages(
     st.session_state.current_chat_id
 )
 
+for message in messages:
 
-# ============================================================
-# MAIN HEADER — minimal top bar instead of a giant hero title
-# ============================================================
-
-import html as _html
-
-_doc_count = len(current_documents)
-_doc_label = f"{_doc_count} PDF" + ("" if _doc_count == 1 else "s")
-
-st.markdown(
-    textwrap.dedent(f"""\
-    <div class="top-bar">
-        <div class="top-bar-title">{_html.escape(current_chat['title'])}</div>
-        <div class="top-bar-meta">{_doc_label if _doc_count else ''}</div>
-    </div>
-    <div class="top-bar-divider"></div>
-    """),
-    unsafe_allow_html=True
-)
-
-
-# ============================================================
-# EMPTY CHAT vs ACTIVE CHAT
-# ============================================================
-
-if not messages and not current_documents:
-
-    # --------------------------------------------------------
-    # Attractive hero — shown only for a brand-new, empty chat
-    # --------------------------------------------------------
-
-    st.markdown(
-        textwrap.dedent("""\
-        <div class="hero-wrap">
-            <div class="hero-icon">📁</div>
-            <div class="hero-title">PDF RAG Assistant</div>
-            <div class="hero-sub">Chat with your uploaded PDFs</div>
-            <div class="hero-pill">📄 Upload your PDFs</div>
-            <div class="hero-hint">
-                Use the 📎 attachment button inside the chat box below to add
-                one or more PDFs, then ask questions, compare documents,
-                summarize, or find specific information.
-            </div>
-        </div>
-        """),
-        unsafe_allow_html=True
-    )
-
-else:
-
-    # --------------------------------------------------------
-    # Compact document strip (only shown once a chat has PDFs)
-    # --------------------------------------------------------
-
-    if current_documents:
-
-        chips = "".join(
-            f'<span class="doc-chip">📄 {_html.escape(doc["filename"])}</span>'
-            for doc in current_documents
-        )
+    with st.chat_message(
+        message["role"]
+    ):
 
         st.markdown(
-            f'<div class="doc-strip">{chips}</div>',
-            unsafe_allow_html=True
+            message["content"]
         )
-
-    # --------------------------------------------------------
-    # DISPLAY CHAT HISTORY — ChatGPT-style left/right bubbles
-    # (alignment + bubble styling comes entirely from the CSS
-    # injected above; the underlying data and roles are exactly
-    # what get_messages() already returned)
-    # --------------------------------------------------------
-
-    for msg_index, message in enumerate(messages):
-
-        with st.chat_message(message["role"]):
-
-            if message["role"] == "assistant":
-                render_assistant_markdown(message["content"])
-                
-            else:
-                st.markdown(message["content"])
 
 
 # ============================================================
@@ -2098,7 +1440,7 @@ if chat_submission:
     # --------------------------------------------------------
 
     # Every attachment is processed into this chat's existing
-    # Milvus collection. Therefore a later upload is ADDED to
+    # ChromaDB collection. Therefore a later upload is ADDED to
     # the PDFs already stored for this chat; it does not replace
     # the previous documents.
     for uploaded_file in uploaded_files:
@@ -2139,7 +1481,7 @@ if chat_submission:
             )
 
         # process_pdf adds the chunks to the chat-specific
-        # persistent Milvus collection immediately.
+        # persistent ChromaDB collection immediately.
         st.session_state.vector_store = vector_store
 
         if added:
@@ -2269,7 +1611,7 @@ if chat_submission:
 
     with st.chat_message("assistant"):
 
-        with st.spinner("Searching documents & generating answer..."):
+        with st.spinner("Thinking..."):
 
             (
                 answer,
@@ -2289,36 +1631,34 @@ if chat_submission:
                 current_chat_id
             )
 
-        render_assistant_markdown(answer)
-        
+        st.markdown(answer)
 
         # ----------------------------------------------------
-        # TIMING / TOKENS / EVIDENCE — tucked into one compact
-        # "Details" expander instead of three loose caption
-        # lines, purely to declutter the message (same values,
-        # same variables, nothing recomputed).
+        # TIMING
         # ----------------------------------------------------
+
+        st.caption(
+            f"⏱️ {total_time:.2f}s · "
+            f"Chroma: {retrieval_time:.2f}s · "
+            f"Jina: {rerank_time:.2f}s · "
+            f"Llama: {stage_timings.get('llama_generation_s', 0):.2f}s"
+        )
 
         prompt_tokens = llama_metrics.get("prompt_tokens")
         completion_tokens = llama_metrics.get("completion_tokens")
         total_tokens = llama_metrics.get("total_tokens")
 
         st.caption(
-            f"⏱️ {total_time:.2f}s · Evidence: **{evidence_status}**"
+            f"🔢 Tokens — Prompt: {prompt_tokens if prompt_tokens is not None else 'N/A'} · "
+            f"Completion: {completion_tokens if completion_tokens is not None else 'N/A'} · "
+            f"Total: {total_tokens if total_tokens is not None else 'N/A'}"
         )
 
-        with st.expander("📊 Details — timing, tokens & stages"):
-            st.write(
-                f"⏱️ Dense: {retrieval_time:.2f}s · "
-                f"Jina: {rerank_time:.2f}s · "
-                f"Llama: {stage_timings.get('llama_generation_s', 0):.2f}s"
-            )
-            st.write(
-                f"🔢 Tokens — Prompt: {prompt_tokens if prompt_tokens is not None else 'N/A'} · "
-                f"Completion: {completion_tokens if completion_tokens is not None else 'N/A'} · "
-                f"Total: {total_tokens if total_tokens is not None else 'N/A'}"
-            )
-            st.divider()
+        st.caption(
+            f"Evidence status: **{evidence_status}**"
+        )
+
+        with st.expander("📊 Stage-level latency & token details"):
             for stage_name, stage_time in stage_timings.items():
                 st.write(
                     f"**{stage_name}**: {stage_time:.4f}s"
@@ -2336,9 +1676,7 @@ if chat_submission:
                 "llama": llama_metrics,
                 "jina": {
                     "model": JINA_RERANKER_MODEL,
-                    "dense_candidate_count": DENSE_K,
-                    "sparse_candidate_count": SPARSE_K,
-                    "fusion_candidate_count": FUSION_K,
+                    "candidate_count": RETRIEVAL_K,
                     "selected_count": len(matching_docs)
                 }
             })
@@ -2381,13 +1719,8 @@ if chat_submission:
                         )
 
                     st.write(source)
-                    rrf_score = doc.metadata.get("rrf_score", 0.0)
-                    dense_rank = doc.metadata.get("dense_rank")
-                    sparse_rank = doc.metadata.get("sparse_rank")
                     st.caption(
-                        f"Jina: {jina_score:.4f} · RRF: {rrf_score:.5f} · "
-                        f"Dense rank: {dense_rank or '—'} · "
-                        f"BM25 rank: {sparse_rank or '—'} · "
+                        f"Jina relevance: {jina_score:.4f} · "
                         f"Chunk ID: {chunk_id}"
                     )
 
@@ -2433,3 +1766,17 @@ if chat_submission:
         )
 
     st.rerun()
+
+
+# ============================================================
+# EMPTY STATE
+# ============================================================
+
+if (
+    not messages
+    and not current_documents
+):
+
+    st.info(
+        "Use the 📎 attachment button inside the chat input to add one or more PDFs, then type your question and press Enter."
+    )
