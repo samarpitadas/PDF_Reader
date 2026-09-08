@@ -1,4 +1,4 @@
-# PDF RAG Chat — Design Document
+# PDF RAG Chat : Design Document
 
 ## 1. Overview
 
